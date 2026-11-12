@@ -1,6 +1,7 @@
 // todo
 // 1 new feature > filter page: in edit mode, right-click selected text > filter by term
 
+import { queryMatches } from './matcher';
 import { Keymap, MarkdownView, Plugin, TFolder, View, WorkspaceLeaf, setIcon } from 'obsidian';
 import { EditorView } from '@codemirror/view';
 import { createLiveFilter, setExcludeMode, setFilterQuery, setPreserveStructure, setShowEllipses } from './live-filter';
@@ -488,7 +489,7 @@ export default class FileFilterPlugin extends Plugin {
 		const allFolders = this.app.vault.getAllLoadedFiles()
 			.filter((f): f is TFolder => f instanceof TFolder && inScope(f.path));
 		const matchedFolderPaths = allFolders
-			.filter(f => f.path !== '' && rel(f.path).includes(q))
+			.filter(f => f.path !== '' && queryMatches(rel(f.path), q))
 			.map(f => f.path);
 		const isUnderMatched = (p: string): boolean =>
 			matchedFolderPaths.some(m => p === m || p.startsWith(m + '/'));
@@ -496,7 +497,7 @@ export default class FileFilterPlugin extends Plugin {
 		// Files whose full path contains the query, or that live under a matched folder
 		const matchingFilePaths = new Set(
 			this.app.vault.getFiles()
-				.filter(f => inScope(f.path) && (rel(f.path).includes(q) || isUnderMatched(f.path)))
+				.filter(f => inScope(f.path) && (queryMatches(rel(f.path), q) || isUnderMatched(f.path)))
 				.map(f => f.path),
 		);
 

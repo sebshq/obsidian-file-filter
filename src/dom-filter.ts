@@ -4,7 +4,7 @@
 // blocks are filtered whole. Runs of hidden blocks/items collapse into a
 // clickable ellipsis, and matched substrings are highlighted.
 
-import { TaskKind, taskKind } from './matcher';
+import { TaskKind, matchRanges, queryMatches } from './matcher';
 
 // Section children that aren't filterable content.
 function isNonContent(el: Element): boolean {
@@ -49,18 +49,14 @@ function highlightTextNodes(el: Node, q: string): void {
 	if (el.nodeType === Node.TEXT_NODE) {
 		const text = el.textContent ?? '';
 		const lower = text.toLowerCase();
-		if (!lower.includes(q)) return;
-		const frag = activeDocument.createDocumentFragment();
+		const ranges = matchRanges(lower, q);
+		if (!ranges.length) return;
+		const frag = createFragment();
 		let last = 0;
-		let i = lower.indexOf(q, 0);
-		while (i !== -1) {
+		for (const [i, end] of ranges) {
 			if (i > last) frag.appendChild(activeDocument.createTextNode(text.slice(last, i)));
-			const span = activeDocument.createElement('span');
-			span.className = 'pf-highlight';
-			span.textContent = text.slice(i, i + q.length);
-			frag.appendChild(span);
-			last = i + q.length;
-			i = lower.indexOf(q, last);
+			frag.appendChild(createSpan({ cls: 'pf-highlight', text: text.slice(i, end) }));
+			last = end;
 		}
 		if (last < text.length) frag.appendChild(activeDocument.createTextNode(text.slice(last)));
 		el.parentNode?.replaceChild(frag, el);
@@ -92,7 +88,7 @@ function insertEllipsisRuns(container: HTMLElement, items: HTMLElement[]): void 
 		if (items[i]!.classList.contains('pf-no-match')) {
 			let end = i;
 			while (end < items.length && items[end]!.classList.contains('pf-no-match')) end++;
-			const dot = createEl('div', { cls: 'pf-ellipsis', text: '···' });
+			const dot = createDiv({ cls: 'pf-ellipsis', text: '···' });
 			if (end < items.length) container.insertBefore(dot, items[end]!);
 			else container.appendChild(dot);
 			i = end;
@@ -209,8 +205,7 @@ function hideOwnContent(li: HTMLElement): void {
 		nodes.push(node);
 	});
 	if (nodes.length === 0) return;
-	const wrapper = activeDocument.createElement('span');
-	wrapper.className = 'pf-passthrough-content';
+	const wrapper = createSpan({ cls: 'pf-passthrough-content' });
 	li.insertBefore(wrapper, nodes[0]!);
 	nodes.forEach(n => wrapper.appendChild(n));
 }
@@ -234,11 +229,9 @@ function filterList(list: HTMLElement, q: string, exclude: boolean): boolean {
 		c => c.tagName === 'LI' && !c.classList.contains('pf-ellipsis'),
 	) as HTMLElement[];
 
-	const kind = taskKind(q);
 	let anyKept = false;
 	for (const li of items) {
-		const ownMatch = liOwnText(li).toLowerCase().includes(q)
-			|| (kind !== null && liTaskMatch(li, kind));
+		const ownMatch = queryMatches(liOwnText(li), q, (kind) => liTaskMatch(li, kind));
 		const keepOwn = exclude ? !ownMatch : ownMatch;
 		const nestedLists = Array.from(li.children).filter(
 			c => c.tagName === 'UL' || c.tagName === 'OL',
@@ -276,10 +269,10 @@ function filterList(list: HTMLElement, q: string, exclude: boolean): boolean {
 // (include mode) keeps every row. Returns true if any body row is kept.
 export function filterTable(table: HTMLElement, q: string, exclude: boolean, highlight = true): boolean {
 	table.classList.add('pf-filtering');
-	const headerMatch = !exclude && (table.querySelector('thead')?.textContent?.toLowerCase() ?? '').includes(q);
+	const headerMatch = !exclude && queryMatches(table.querySelector('thead')?.textContent ?? '', q);
 	let anyKept = headerMatch;
 	table.querySelectorAll<HTMLElement>('tbody > tr').forEach(tr => {
-		const matches = (tr.textContent?.toLowerCase() ?? '').includes(q);
+		const matches = queryMatches(tr.textContent ?? '', q);
 		const keep = headerMatch || (exclude ? !matches : matches);
 		tr.classList.toggle('pf-no-match', !keep);
 		if (keep) anyKept = true;
@@ -333,21 +326,22 @@ export function applyBlockFilter(
 	const blocks = Array.from(section.children).filter(
 		c => c.tagName === 'DIV' && !isNonContent(c),
 	) as HTMLElement[];
+	// An embed's section is drawn only once it's in sight; until then it stays,
+	// and the filter runs again as it's drawn.
+	if (!blocks.length) return true;
 
 	blocks.forEach(el => {
 		// A note embed (![[page]]) is filtered by recursing into its own rendered
 		// section, so its non-matching paragraphs collapse like the host page.
-		// Kept only if something inside matched. (Media/image embeds lack the
-		// .markdown-embed class and fall through to the block path below.)
+		// Kept only if something inside matched, or it isn't drawn yet.
+		// (Media/image embeds lack the .markdown-embed class and fall through to
+		// the block path below.)
 		const embed = el.matches('.internal-embed.markdown-embed')
 			? el
 			: el.querySelector<HTMLElement>('.internal-embed.markdown-embed');
 		if (embed) {
 			const inner = embed.querySelector<HTMLElement>('.markdown-preview-section');
-			const innerMatch = (el.textContent?.toLowerCase() ?? '').includes(q);
-			const kept = inner
-				? applyBlockFilter(inner, q, opts)
-				: (opts.exclude ? !innerMatch : innerMatch);
+			const kept = inner ? applyBlockFilter(inner, q, opts) : true;
 			el.classList.toggle('pf-no-match', !kept);
 		} else if (el.classList.contains('el-ul') || el.classList.contains('el-ol')) {
 			// List blocks filter per-item to match Live Preview's line granularity.
@@ -358,8 +352,7 @@ export function applyBlockFilter(
 			const anyKept = filterTable(el.querySelector('table')!, q, opts.exclude ?? false);
 			el.classList.toggle('pf-no-match', !anyKept);
 		} else {
-			const text = el.textContent?.toLowerCase() ?? '';
-			const matches = text.includes(q);
+			const matches = queryMatches(el.textContent ?? '', q);
 			const keep = opts.exclude ? !matches : matches;
 			el.classList.toggle('pf-no-match', !keep);
 			if (keep && !opts.exclude) highlightTextNodes(el, q);

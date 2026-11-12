@@ -27,7 +27,7 @@ import {
 	WidgetType,
 } from '@codemirror/view';
 import { applyBlockFilter, clearBlockFilter, clearTableFilter, filterTable } from './dom-filter';
-import { taskContentMatches, taskKind, taskLineMatches } from './matcher';
+import { matchRanges, queryMatches, taskLineMatches } from './matcher';
 
 // Dispatch this to a CM editor to set the active filter query ('' = no filter).
 export const setFilterQuery = StateEffect.define<string>();
@@ -54,10 +54,7 @@ class EllipsisWidget extends WidgetType {
 	}
 
 	toDOM(): HTMLElement {
-		const el = activeDocument.createElement('div');
-		el.className = 'cm-pf-ellipsis';
-		el.textContent = '···';
-		return el;
+		return createDiv({ cls: 'cm-pf-ellipsis', text: '···' });
 	}
 
 	// Let clicks fall through to the plugin's viewEl listener (which clears the
@@ -79,7 +76,7 @@ class HiddenGutterMarker extends GutterMarker {
 const hiddenGutter = new HiddenGutterMarker();
 
 // Holds the active query for a given editor.
-const queryField = StateField.define<string>({
+export const queryField = StateField.define<string>({
 	create: () => '',
 	update(value, tr) {
 		for (const e of tr.effects) {
@@ -89,7 +86,7 @@ const queryField = StateField.define<string>({
 	},
 });
 
-const preserveStructureField = StateField.define<boolean>({
+export const preserveStructureField = StateField.define<boolean>({
 	create: () => false,
 	update(value, tr) {
 		for (const e of tr.effects) {
@@ -109,11 +106,23 @@ const showEllipsesField = StateField.define<boolean>({
 	},
 });
 
-const excludeField = StateField.define<boolean>({
+export const excludeField = StateField.define<boolean>({
 	create: () => false,
 	update(value, tr) {
 		for (const e of tr.effects) {
 			if (e.is(setExcludeMode)) return e.value;
+		}
+		return value;
+	},
+});
+
+// Whether the editor has focus; the cursor's line is kept only then, so an unfocused note filters fully.
+const setFocused = StateEffect.define<boolean>();
+const focusedField = StateField.define<boolean>({
+	create: () => false,
+	update(value, tr) {
+		for (const e of tr.effects) {
+			if (e.is(setFocused)) return e.value;
 		}
 		return value;
 	},
@@ -136,9 +145,9 @@ function buildDecorations(state: EditorState): DecorationSet {
 
 	// Lines touched by the selection/cursor stay visible regardless of match, so
 	// you can press Enter and edit a new (not-yet-matching) paragraph in place.
-	// The line collapses again once the cursor leaves it.
+	// The line collapses again once the cursor leaves it, or the editor loses focus.
 	const cursorLines = new Set<number>();
-	for (const range of state.selection.ranges) {
+	if (state.field(focusedField)) for (const range of state.selection.ranges) {
 		const first = doc.lineAt(range.from).number;
 		const last = doc.lineAt(range.to).number;
 		for (let n = first; n <= last; n++) cursorLines.add(n);
@@ -147,17 +156,14 @@ function buildDecorations(state: EditorState): DecorationSet {
 	// Pass 1: classify every line.
 	const lineVisible = new Array<boolean>(doc.lines + 1);
 	const lineMatches = new Array<boolean>(doc.lines + 1); // direct text match only
-	const kind = taskKind(q);
 	for (let i = 1; i <= doc.lines; i++) {
 		const line = doc.line(i);
-		const lower = line.text.toLowerCase();
 		const isEmbed = EMBED_LINE.test(line.text);
-		const literal = lower.includes(q);
-		const matches = literal || (kind !== null && taskLineMatches(line.text, kind));
+		const matches = queryMatches(line.text, q, (kind) => taskLineMatches(line.text, kind));
 		const keep = exclude ? !matches : matches;
 		// Highlight only literal occurrences (and none in exclude mode — kept
 		// lines don't contain the query there).
-		lineMatches[i] = !exclude && literal && !isEmbed;
+		lineMatches[i] = !exclude && matches && !isEmbed;
 		lineVisible[i] = cursorLines.has(i) || isEmbed || keep;
 	}
 
@@ -204,9 +210,7 @@ function buildDecorations(state: EditorState): DecorationSet {
 			if (lineMatches[i]) {
 				const line = doc.line(i);
 				const lower = line.text.toLowerCase();
-				for (let idx = lower.indexOf(q); idx !== -1; idx = lower.indexOf(q, idx + q.length)) {
-					decos.push(highlightMark.range(line.from + idx, line.from + idx + q.length));
-				}
+				for (const [from, to] of matchRanges(lower, q)) decos.push(highlightMark.range(line.from + from, line.from + to));
 			}
 			continue;
 		}
@@ -226,7 +230,7 @@ const decoField = StateField.define<DecorationSet>({
 	create: (state) => buildDecorations(state),
 	update(value, tr) {
 		const filterChanged = tr.effects.some(
-			(e) => e.is(setFilterQuery) || e.is(setPreserveStructure) || e.is(setShowEllipses) || e.is(setExcludeMode),
+			(e) => e.is(setFilterQuery) || e.is(setPreserveStructure) || e.is(setShowEllipses) || e.is(setExcludeMode) || e.is(setFocused),
 		);
 		// Recompute on selection moves too, so the cursor's line stays exempt.
 		const modeChanged = tr.startState.field(editorLivePreviewField, false) !== tr.state.field(editorLivePreviewField, false);
@@ -332,12 +336,11 @@ class EmbedFilter implements PluginValue {
 			if (file && !this.matchCache.has(file.path)) files.set(file.path, file);
 		}
 
-		const kind = taskKind(this.query);
 		for (const [path, file] of files) {
 			let matches = false;
 			try {
 				const content = (await this.app.vault.cachedRead(file)).toLowerCase();
-				matches = content.includes(this.query) || (kind !== null && taskContentMatches(content, kind));
+				matches = queryMatches(content, this.query);
 			} catch {
 				matches = false;
 			}
@@ -458,10 +461,10 @@ class TableFilter implements PluginValue {
 		for (let node = walker.nextNode(); node; node = walker.nextNode()) {
 			if (node.parentElement?.closest('tr.pf-no-match')) continue;
 			const lower = (node.textContent ?? '').toLowerCase();
-			for (let i = lower.indexOf(q); i !== -1; i = lower.indexOf(q, i + q.length)) {
+			for (const [from, to] of matchRanges(lower, q)) {
 				const range = table.ownerDocument.createRange();
-				range.setStart(node, i);
-				range.setEnd(node, i + q.length);
+				range.setStart(node, from);
+				range.setEnd(node, to);
 				h.add(range);
 				this.ranges.push(range);
 			}
@@ -471,5 +474,5 @@ class TableFilter implements PluginValue {
 
 // Build the editor extension. Needs App for resolving/reading embedded files.
 export function createLiveFilter(app: App): Extension {
-	return [queryField, preserveStructureField, showEllipsesField, excludeField, decoField, ViewPlugin.define((view) => new EmbedFilter(view, app)), ViewPlugin.define((view) => new TableFilter(view))];
+	return [queryField, preserveStructureField, showEllipsesField, excludeField, focusedField, EditorView.focusChangeEffect.of((_state, focusing) => setFocused.of(focusing)), decoField, ViewPlugin.define((view) => new EmbedFilter(view, app)), ViewPlugin.define((view) => new TableFilter(view))];
 }

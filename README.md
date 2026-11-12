@@ -30,6 +30,17 @@ Shortcut: type **`-`** as the first character (e.g. `-apple`) to switch to exclu
 
 Click the icon again to switch back. Closing the filter bar resets to normal (include) mode.
 
+### Several terms
+
+One search can hold several filters, in the editor filter and the Files pane:
+
+- `gym; run` shows paragraphs with **gym or run**.
+- `gym & run` shows paragraphs with **both**.
+- `gym & -draft` shows paragraphs with gym and **without** draft. A `-` after `;` or `&` excludes that term.
+- `"r&d; notes"` in quotes is searched as written.
+
+`&` binds tighter than `;`, so `gym & -draft; run` means (gym and not draft) or run. Task keywords work as terms too: `todo & gym`.
+
 ### Tables
 
 Tables are filtered by row: a table with a match shows its header plus only the matching rows (highlighted), and tables with no match are hidden. If the header itself matches, the whole table is shown. In exclude mode, matching rows are hidden instead.
